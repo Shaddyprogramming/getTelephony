@@ -33,7 +33,6 @@ BW_MAP : dict = {
     "20000": "20 MHz",
 }
 
-
 BW_SCI_MAP : dict = {
     "1400" : "1.4e3",
     "3000" : "3e3",
@@ -107,13 +106,16 @@ def extract(pattern: str, text: str, fallback: str = "") -> str:
 def clean(val: str) -> str:
     """
     Strips Android sentinel values and blanks.
-    Returns empty string when val is Integer.MAX_VALUE, its negative,
-    an empty string, or the literal 'null'.
+    Returns "hidden" when val is Integer.MAX_VALUE or its negative
+    (value exists but is restricted by the device), empty string when
+    val is blank or null.
 
     @ val  : str = raw extracted value to sanitise
-    -> str : original val if valid, otherwise empty string
+    -> str : original val if valid, "hidden" if sentinel, otherwise empty string
     """
-    return "" if val in (str(SENTINEL), str(-SENTINEL), "", "null") else val
+    if val in (str(SENTINEL), str(-SENTINEL)):
+        return "hidden"
+    return "" if val in ("", "null") else val
 
 
 def map_bandwidth(raw_val: str) -> str:
@@ -192,6 +194,10 @@ def parse_cell_identity_xiaomi(phone0: str) -> dict:
     mnc      : str = clean(extract(r"mMnc=(\d+)",       ci_block))
     bw       : str = clean(extract(r"mBandwidth=(\d+)", ci_block))
     provider : str = extract(r"mAlphaLong=([^,\s}]+)",  ci_block)
+
+    if "Digi" in provider:
+        provider = "Digi"
+
     earfcn   : str = clean(extract(r"mChannelNumber=(\d+)", phone0))
 
     pci_match = re.search(
@@ -202,8 +208,8 @@ def parse_cell_identity_xiaomi(phone0: str) -> dict:
     return {
         "mcc"         : mcc,
         "mnc"         : mnc,
-        "tac"         : "",
-        "eci"         : "",
+        "tac"         : "hidden",
+        "eci"         : "hidden",
         "earfcn"      : earfcn,
         "pci"         : pci,
         "lteBandwidth": map_bandwidth(bw),
@@ -255,6 +261,10 @@ def parse_cell_identity_samsung(phone0: str) -> dict:
         extract(r"mAlphaLong=([^,\s}]+)", ci_block) or
         extract(r"mOperatorAlphaLong=([^,\s}]+)", ci_block)
     )
+    
+
+    if "Digi" in provider:
+        provider = "Digi"
 
     if not pci:
         pci_match = re.search(
@@ -297,6 +307,9 @@ def parse_cell_identity_pixel(phone0: str) -> dict:
     pci    : str = clean(extract(r"mPci=(\d+)",       ci_block))
     bw     : str = clean(extract(r"mBandwidth=(\d+)", ci_block))
     provider : str = extract(r"mAlphaLong=([^,\s}]+)", ci_block)
+
+    if "Digi" in provider:
+        provider = "Digi"
 
     if not pci:
         pci_match = re.search(
@@ -353,6 +366,9 @@ def parse_cell_identity_motorola(phone0: str) -> dict:
         extract(r"mOperatorAlphaLong=([^,\s}]+)", ci_block)
     )
 
+    if "Digi" in provider:
+        provider = "Digi"
+
     if not pci:
         pci_match = re.search(
             r"mConnectionStatus=PrimaryServing[^}]*?mPhysicalCellId=(\d+)", phone0
@@ -398,6 +414,9 @@ def parse_cell_identity_oneplus(phone0: str) -> dict:
     pci    : str = clean(extract(r"mPci=(\d+)", ci_block))
     bw     : str = clean(extract(r"mBandwidth=(\d+)", ci_block))
     provider : str = extract(r"mAlphaLong=([^,\s}]+)", ci_block)
+
+    if "Digi" in provider:
+        provider = "Digi"
 
     if not pci:
         pci_match = re.search(
@@ -468,6 +487,9 @@ def parse_cell_identity_generic(phone0: str) -> dict:
         extract(r"mOperatorAlphaLong=([^,\s}]+)", ci_block) or
         extract(r"operatorName=([^,\s}]+)", ci_block)
     )
+
+    if "Digi" in provider:
+        provider = "Digi"
 
     if not pci:
         pci_match = re.search(
@@ -605,7 +627,7 @@ def _parse_location_block(block: str) -> dict:
         "latitude" : "" if lat in ZERO_VALS else lat,
         "longitude": "" if lon in ZERO_VALS else lon,
         "altitude" : "" if alt in ZERO_VALS else alt,
-        "speed"    : "" if spd in ZERO_VALS else spd,
+        "speed"    : "0" if spd in ZERO_VALS else spd,
         "accuracy" : "" if acc in ZERO_VALS else acc,
     }
 
@@ -794,7 +816,7 @@ def run_loop(serial: str, manufacturer: str) -> None:
             write_row(writer, row)
             f.flush()
             count += 1
-            print(f"[{count:>{len(str(RUNS))}}/{RUNS}]")
+            print(f"[{count:>{len(str(RUNS))}}/{RUNS} ]")
             if count < RUNS:
                 time.sleep(INTERVAL_SEC)
 
