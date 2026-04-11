@@ -7,9 +7,9 @@ from datetime import datetime
 
 # CONSTANTS
 
-OUTPUT_FILE  : str = "lte_data.csv"
+OUTPUT_FILE  : str   = "lte_data.csv"
 INTERVAL_SEC : float = 0.5
-RUNS         : int = 10
+RUNS         : int   = 10
 
 HEADERS : list = [
     "deviceTime",
@@ -66,7 +66,7 @@ def run_adb(command: str, timeout: int = 12) -> str:
 def get_serial() -> str:
     """
     Retrieves the ADB device serial number.
-    
+
     @ None
     -> str : serial number, or empty string on failure
     """
@@ -99,8 +99,24 @@ def extract(pattern: str, text: str, fallback: str = "") -> str:
     @ fallback : str = value to return when there is no match
     -> str     : matched group (stripped), or fallback
     """
-    m = re.search(pattern, text)
+    m = re.search(pattern, text, re.IGNORECASE)
     return m.group(1).strip() if m else fallback
+
+
+def first_of(text: str, *patterns: str) -> str:
+    """
+    Tries each pattern in order and returns the first match found.
+    All patterns must have exactly one capture group.
+
+    @ text     : str   = text to search
+    @ patterns : str   = one or more regex patterns, tried left-to-right
+    -> str     : first matched group (stripped), or empty string
+    """
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return ""
 
 
 def clean(val: str) -> str:
@@ -155,364 +171,50 @@ def get_phone0_block(raw: str) -> str:
 
 def parse_lte_signal(raw: str) -> dict:
     """
-    Extracts LTE signal metrics from the mLte=CellSignalStrengthLte block,
+    Extracts LTE signal metrics from the mSignalStrength block,
     scoped to Phone Id=0.
+
+    Handles two formats found across Android OEMs:
+      - Wrapped:   mLte=CellSignalStrengthLte: rssi=... rsrp=...
+      - Flat:      CellSignalStrengthLte: rssi=... rsrp=...   (S24 / One UI 6+)
+    Both formats are searched and the first match wins.
 
     @ raw   : str  = full dumpsys telephony.registry output
     -> dict : keys rsrp, rsrq, rssi, snr, ta — all str, empty when absent
     """
     phone0 : str = get_phone0_block(raw)
 
-    lte_match = re.search(r"mLte=CellSignalStrengthLte:([^\n,}]+)", phone0)
-    if not lte_match:
-        return {"rsrp": "", "rsrq": "", "rssi": "", "snr": "", "ta": ""}
+    # Try the wrapped mLte= format first (most OEMs), then the flat format (Samsung S24+)
+    lte_block : str = ""
 
-    lte_block : str = lte_match.group(1)
+    m = re.search(r"mLte=CellSignalStrengthLte[:\s]*([^\n,}]+)", phone0)
+    if m:
+        lte_block = m.group(1)
+    else:
+        m = re.search(r"CellSignalStrengthLte[:\s]+([^\n}]+)", phone0)
+        if m:
+            lte_block = m.group(1)
+
+    if not lte_block:
+        return {"rsrp": "", "rsrq": "", "rssi": "", "snr": "", "ta": ""}
 
     return {
         "rsrp": clean(extract(r"rsrp=(-?\d+)",  lte_block)),
         "rsrq": clean(extract(r"rsrq=(-?\d+)",  lte_block)),
         "rssi": clean(extract(r"rssi=(-?\d+)",  lte_block)),
-        "snr" : clean(extract(r"rssnr=(-?\d+)", lte_block)),
+        "snr" : clean(first_of(lte_block, r"rssnr=(-?\d+)", r"\bsnr=(-?\d+)")),
         "ta"  : clean(extract(r"\bta=(\d+)",    lte_block)),
-    }
-
-
-def parse_cell_identity_xiaomi(phone0: str) -> dict:
-    """
-    Extracts cell identity fields using MIUI / HyperOS-specific field names.
-    TAC and ECI are unavailable on Xiaomi due to modem restrictions.
-
-    @ phone0 : str  = Phone Id=0 block from dumpsys telephony.registry
-    -> dict  : keys mcc, mnc, tac, eci, earfcn, pci, lteBandwidth, provider
-               — all str, empty when absent
-    """
-    ci_match = re.search(r"mCellIdentity=CellIdentityLte:\{([^}]+)\}", phone0)
-    ci_block : str = ci_match.group(1) if ci_match else ""
-
-    mcc      : str = clean(extract(r"mMcc=(\d+)",       ci_block))
-    mnc      : str = clean(extract(r"mMnc=(\d+)",       ci_block))
-    bw       : str = clean(extract(r"mBandwidth=(\d+)", ci_block))
-    provider : str = extract(r"mAlphaLong=([^,\s}]+)",  ci_block)
-
-    if "Digi" in provider:
-        provider = "Digi"
-
-    earfcn   : str = clean(extract(r"mChannelNumber=(\d+)", phone0))
-
-    pci_match = re.search(
-        r"mConnectionStatus=PrimaryServing[^}]*?mPhysicalCellId=(\d+)", phone0
-    )
-    pci : str = clean(pci_match.group(1) if pci_match else "")
-
-    return {
-        "mcc"         : mcc,
-        "mnc"         : mnc,
-        "tac"         : "hidden",
-        "eci"         : "hidden",
-        "earfcn"      : earfcn,
-        "pci"         : pci,
-        "lteBandwidth": map_bandwidth(bw),
-        "provider"    : provider,
-    }
-
-
-def parse_cell_identity_samsung(phone0: str) -> dict:
-    """
-    Extracts cell identity fields using Samsung One UI field names.
-    Samsung may use alternate casing or additional proprietary extensions.
-
-    @ phone0 : str  = Phone Id=0 block from dumpsys telephony.registry
-    -> dict  : keys mcc, mnc, tac, eci, earfcn, pci, lteBandwidth, provider
-               — all str, empty when absent
-    """
-    ci_match = re.search(
-        r"mCellIdentity(?:LTE|Lte)?[=:\s{]+([^}]+)\}",
-        phone0, re.IGNORECASE
-    )
-    ci_block : str = ci_match.group(1) if ci_match else phone0
-
-    mcc : str = clean(
-        extract(r"mMccStr[=:\s]+(\d+)", ci_block) or
-        extract(r"mMcc[=:\s]+(\d+)", ci_block)
-    )
-    mnc : str = clean(
-        extract(r"mMncStr[=:\s]+(\d+)", ci_block) or
-        extract(r"mMnc[=:\s]+(\d+)", ci_block)
-    )
-    tac : str = clean(
-        extract(r"mTac[=:\s]+(\d+)", ci_block) or
-        extract(r"\btac[=:\s]+(\d+)", ci_block)
-    )
-    eci : str = clean(
-        extract(r"mCi[=:\s]+(\d+)", ci_block) or
-        extract(r"mEci[=:\s]+(\d+)", ci_block)
-    )
-    earfcn : str = clean(
-        extract(r"mEarfcn[=:\s]+(\d+)", ci_block) or
-        extract(r"mChannelNumber[=:\s]+(\d+)", phone0)
-    )
-    pci : str = clean(
-        extract(r"mPci[=:\s]+(\d+)", ci_block) or
-        extract(r"mPhysicalCellId[=:\s]+(\d+)", phone0)
-    )
-    bw : str = clean(extract(r"mBandwidth[=:\s]+(\d+)", ci_block))
-    provider : str = (
-        extract(r"mAlphaLong=([^,\s}]+)", ci_block) or
-        extract(r"mOperatorAlphaLong=([^,\s}]+)", ci_block)
-    )
-    
-
-    if "Digi" in provider:
-        provider = "Digi"
-
-    if not pci:
-        pci_match = re.search(
-            r"mConnectionStatus=PrimaryServing[^}]*?mPhysicalCellId=(\d+)", phone0
-        )
-        pci = clean(pci_match.group(1) if pci_match else "")
-
-    return {
-        "mcc"         : mcc,
-        "mnc"         : mnc,
-        "tac"         : tac,
-        "eci"         : eci,
-        "earfcn"      : earfcn,
-        "pci"         : pci,
-        "lteBandwidth": map_bandwidth(bw),
-        "provider"    : provider,
-    }
-
-
-def parse_cell_identity_pixel(phone0: str) -> dict:
-    """
-    Extracts cell identity fields for Google Pixel / stock AOSP devices.
-    AOSP uses clean, well-documented field names that rarely deviate.
-
-    @ phone0 : str  = Phone Id=0 block from dumpsys telephony.registry
-    -> dict  : keys mcc, mnc, tac, eci, earfcn, pci, lteBandwidth, provider
-               — all str, empty when absent
-    """
-    ci_match = re.search(
-        r"CellIdentityLte\s*\{([^}]+)\}",
-        phone0, re.IGNORECASE
-    )
-    ci_block : str = ci_match.group(1) if ci_match else phone0
-
-    mcc    : str = clean(extract(r"mMcc=(\d+)",       ci_block))
-    mnc    : str = clean(extract(r"mMnc=(\d+)",       ci_block))
-    tac    : str = clean(extract(r"mTac=(\d+)",       ci_block))
-    eci    : str = clean(extract(r"mCi=(\d+)",        ci_block))
-    earfcn : str = clean(extract(r"mEarfcn=(\d+)",    ci_block))
-    pci    : str = clean(extract(r"mPci=(\d+)",       ci_block))
-    bw     : str = clean(extract(r"mBandwidth=(\d+)", ci_block))
-    provider : str = extract(r"mAlphaLong=([^,\s}]+)", ci_block)
-
-    if "Digi" in provider:
-        provider = "Digi"
-
-    if not pci:
-        pci_match = re.search(
-            r"mConnectionStatus=PrimaryServing[^}]*?mPhysicalCellId=(\d+)", phone0
-        )
-        pci = clean(pci_match.group(1) if pci_match else "")
-
-    return {
-        "mcc"         : mcc,
-        "mnc"         : mnc,
-        "tac"         : tac,
-        "eci"         : eci,
-        "earfcn"      : earfcn,
-        "pci"         : pci,
-        "lteBandwidth": map_bandwidth(bw),
-        "provider"    : provider,
-    }
-
-
-def parse_cell_identity_motorola(phone0: str) -> dict:
-    """
-    Extracts cell identity fields for Motorola devices.
-    Motorola stock Android is close to AOSP but occasionally uses
-    alternate field casing or extra prefixes.
-
-    @ phone0 : str  = Phone Id=0 block from dumpsys telephony.registry
-    -> dict  : keys mcc, mnc, tac, eci, earfcn, pci, lteBandwidth, provider
-               — all str, empty when absent
-    """
-    ci_match = re.search(
-        r"mCellIdentity(?:LTE|Lte)?[=:\s{]+([^}]+)\}",
-        phone0, re.IGNORECASE
-    )
-    ci_block : str = ci_match.group(1) if ci_match else phone0
-
-    mcc    : str = clean(extract(r"mMcc(?:Str)?=(\d+)", ci_block))
-    mnc    : str = clean(extract(r"mMnc(?:Str)?=(\d+)", ci_block))
-    tac    : str = clean(extract(r"mTac=(\d+)",         ci_block))
-    eci    : str = clean(
-        extract(r"mCi=(\d+)", ci_block) or
-        extract(r"mEci=(\d+)", ci_block)
-    )
-    earfcn : str = clean(
-        extract(r"mEarfcn=(\d+)", ci_block) or
-        extract(r"mChannelNumber=(\d+)", phone0)
-    )
-    pci    : str = clean(
-        extract(r"mPci=(\d+)", ci_block) or
-        extract(r"mPhysicalCellId=(\d+)", phone0)
-    )
-    bw     : str = clean(extract(r"mBandwidth=(\d+)", ci_block))
-    provider : str = (
-        extract(r"mAlphaLong=([^,\s}]+)", ci_block) or
-        extract(r"mOperatorAlphaLong=([^,\s}]+)", ci_block)
-    )
-
-    if "Digi" in provider:
-        provider = "Digi"
-
-    if not pci:
-        pci_match = re.search(
-            r"mConnectionStatus=PrimaryServing[^}]*?mPhysicalCellId=(\d+)", phone0
-        )
-        pci = clean(pci_match.group(1) if pci_match else "")
-
-    return {
-        "mcc"         : mcc,
-        "mnc"         : mnc,
-        "tac"         : tac,
-        "eci"         : eci,
-        "earfcn"      : earfcn,
-        "pci"         : pci,
-        "lteBandwidth": map_bandwidth(bw),
-        "provider"    : provider,
-    }
-
-
-def parse_cell_identity_oneplus(phone0: str) -> dict:
-    """
-    Extracts cell identity fields for OnePlus / Oppo / Realme devices.
-    These brands share an OxygenOS / ColorOS base which closely follows
-    AOSP field names but may embed extra vendor fields.
-
-    @ phone0 : str  = Phone Id=0 block from dumpsys telephony.registry
-    -> dict  : keys mcc, mnc, tac, eci, earfcn, pci, lteBandwidth, provider
-               — all str, empty when absent
-    """
-    ci_match = re.search(
-        r"mCellIdentity(?:LTE|Lte)?[=:\s{]+([^}]+)\}",
-        phone0, re.IGNORECASE
-    )
-    ci_block : str = ci_match.group(1) if ci_match else phone0
-
-    mcc    : str = clean(extract(r"mMcc(?:Str)?=(\d+)", ci_block))
-    mnc    : str = clean(extract(r"mMnc(?:Str)?=(\d+)", ci_block))
-    tac    : str = clean(extract(r"mTac=(\d+)",         ci_block))
-    eci    : str = clean(extract(r"mCi=(\d+)",          ci_block))
-    earfcn : str = clean(
-        extract(r"mEarfcn=(\d+)",        ci_block) or
-        extract(r"mChannelNumber=(\d+)", phone0)
-    )
-    pci    : str = clean(extract(r"mPci=(\d+)", ci_block))
-    bw     : str = clean(extract(r"mBandwidth=(\d+)", ci_block))
-    provider : str = extract(r"mAlphaLong=([^,\s}]+)", ci_block)
-
-    if "Digi" in provider:
-        provider = "Digi"
-
-    if not pci:
-        pci_match = re.search(
-            r"mConnectionStatus=PrimaryServing[^}]*?mPhysicalCellId=(\d+)", phone0
-        )
-        pci = clean(pci_match.group(1) if pci_match else "")
-
-    return {
-        "mcc"         : mcc,
-        "mnc"         : mnc,
-        "tac"         : tac,
-        "eci"         : eci,
-        "earfcn"      : earfcn,
-        "pci"         : pci,
-        "lteBandwidth": map_bandwidth(bw),
-        "provider"    : provider,
-    }
-
-
-def parse_cell_identity_generic(phone0: str) -> dict:
-    """
-    Extracts cell identity fields using multi-pattern matching to cover
-    varying field names across Android OEMs not specifically handled above
-    (Huawei, Nokia, Sony, HTC, etc.).
-
-    @ phone0 : str  = Phone Id=0 block from dumpsys telephony.registry
-    -> dict  : keys mcc, mnc, tac, eci, earfcn, pci, lteBandwidth, provider
-               — all str, empty when absent
-    """
-    ci_match = re.search(
-        r"mCellIdentity(?:LTE|Lte|LTE4G)?[=:\s{]+([^}]+)\}",
-        phone0, re.IGNORECASE
-    )
-    ci_block : str = ci_match.group(1) if ci_match else phone0
-
-    mcc : str = clean(
-        extract(r"mMcc(?:Str)?[=:\s]+(\d+)", ci_block) or
-        extract(r"\bmcc[=:\s]+(\d+)", ci_block)
-    )
-    mnc : str = clean(
-        extract(r"mMnc(?:Str)?[=:\s]+(\d+)", ci_block) or
-        extract(r"\bmnc[=:\s]+(\d+)", ci_block)
-    )
-    tac : str = clean(
-        extract(r"mTac[=:\s]+(\d+)", ci_block) or
-        extract(r"\btac[=:\s]+(\d+)", ci_block)
-    )
-    eci : str = clean(
-        extract(r"mCi[=:\s]+(\d+)", ci_block) or
-        extract(r"\bci[=:\s]+(\d+)", ci_block) or
-        extract(r"mEci[=:\s]+(\d+)", ci_block)
-    )
-    earfcn : str = clean(
-        extract(r"mEarfcn[=:\s]+(\d+)", ci_block) or
-        extract(r"mChannelNumber[=:\s]+(\d+)", phone0) or
-        extract(r"\bearfcn[=:\s]+(\d+)", ci_block)
-    )
-    pci : str = clean(
-        extract(r"mPci[=:\s]+(\d+)", ci_block) or
-        extract(r"mPhysicalCellId[=:\s]+(\d+)", phone0) or
-        extract(r"\bpci[=:\s]+(\d+)", ci_block)
-    )
-    bw : str = clean(
-        extract(r"mBandwidth[=:\s]+(\d+)", ci_block)
-    )
-    provider : str = (
-        extract(r"mAlphaLong=([^,\s}]+)", ci_block) or
-        extract(r"mOperatorAlphaLong=([^,\s}]+)", ci_block) or
-        extract(r"operatorName=([^,\s}]+)", ci_block)
-    )
-
-    if "Digi" in provider:
-        provider = "Digi"
-
-    if not pci:
-        pci_match = re.search(
-            r"mConnectionStatus=PrimaryServing[^}]*?mPhysicalCellId=(\d+)", phone0
-        )
-        pci = clean(pci_match.group(1) if pci_match else "")
-
-    return {
-        "mcc"         : mcc,
-        "mnc"         : mnc,
-        "tac"         : tac,
-        "eci"         : eci,
-        "earfcn"      : earfcn,
-        "pci"         : pci,
-        "lteBandwidth": map_bandwidth(bw),
-        "provider"    : provider,
     }
 
 
 def parse_cell_identity(raw: str, manufacturer: str) -> dict:
     """
-    Dispatches cell identity parsing to the appropriate OEM-specific
-    or generic parser based on the detected device manufacturer.
+    Extracts cell identity fields using a unified multi-pattern approach
+    that covers all known Android OEM variants without OEM-specific branches.
+
+    Tries multiple field name variants for each value in priority order —
+    the first non-empty match wins. Bandwidth falls back to PhysicalChannelConfigs
+    when the mBandwidth field holds a sentinel (common on Samsung S24+).
 
     @ raw          : str  = full dumpsys telephony.registry output
     @ manufacturer : str  = lowercase manufacturer name from getprop
@@ -521,22 +223,107 @@ def parse_cell_identity(raw: str, manufacturer: str) -> dict:
     """
     phone0 : str = get_phone0_block(raw)
 
-    if any(b in manufacturer for b in ("xiaomi", "redmi", "poco")):
-        return parse_cell_identity_xiaomi(phone0)
+    # Isolate the CellIdentityLte block. The S24 uses "CellIdentityLte:{ ... }"
+    # (colon-brace style), older OEMs use "mCellIdentity=CellIdentityLte:{ ... }"
+    # or "mCellIdentityLTE={ ... }". We try all three block patterns and pick the
+    # first match; if none, fall back to searching the whole phone0 block.
+    ci_block : str = ""
+    for ci_pattern in (
+        r"CellIdentityLte[:\s]*\{([^}]+)\}",           # S24 / AOSP flat style
+        r"mCellIdentity(?:LTE|Lte|LTE4G)?[=:\s{]+([^}]+)\}",  # older wrapped style
+    ):
+        m = re.search(ci_pattern, phone0, re.IGNORECASE)
+        if m:
+            ci_block = m.group(1)
+            break
 
-    if "samsung" in manufacturer:
-        return parse_cell_identity_samsung(phone0)
+    if not ci_block:
+        ci_block = phone0  # last resort — search full block
 
-    if "google" in manufacturer:
-        return parse_cell_identity_pixel(phone0)
+    # MCC / MNC — try string variants first (MccStr, MncStr), then plain int fields
+    mcc : str = clean(first_of(
+        ci_block,
+        r"mMcc(?:Str)?[=:\s]+(\d+)",
+        r"\bmcc[=:\s]+(\d+)",
+    ))
+    mnc : str = clean(first_of(
+        ci_block,
+        r"mMnc(?:Str)?[=:\s]+(\d+)",
+        r"\bmnc[=:\s]+(\d+)",
+    ))
 
-    if "motorola" in manufacturer or "moto" in manufacturer:
-        return parse_cell_identity_motorola(phone0)
+    # Xiaomi / MIUI blocks the TAC and ECI in their modem HAL — flag as hidden
+    is_xiaomi : bool = any(b in manufacturer for b in ("xiaomi", "redmi", "poco"))
 
-    if any(b in manufacturer for b in ("oneplus", "oppo", "realme")):
-        return parse_cell_identity_oneplus(phone0)
+    tac : str = "hidden" if is_xiaomi else clean(first_of(
+        ci_block,
+        r"mTac[=:\s]+(\d+)",
+        r"\btac[=:\s]+(\d+)",
+    ))
+    eci : str = "hidden" if is_xiaomi else clean(first_of(
+        ci_block,
+        r"mCi[=:\s]+(\d+)",
+        r"mEci[=:\s]+(\d+)",
+        r"\bci[=:\s]+(\d+)",
+    ))
 
-    return parse_cell_identity_generic(phone0)
+    # EARFCN — Samsung S24 stores this under mDownlinkChannelNumber in
+    # PhysicalChannelConfigs; also check mChannelNumber (Xiaomi) and mEarfcn (AOSP)
+    earfcn : str = clean(first_of(
+        ci_block + "\n" + phone0,
+        r"mEarfcn[=:\s]+(\d+)",
+        r"mChannelNumber[=:\s]+(\d+)",
+        r"mDownlinkChannelNumber[=:\s]+(\d+)",
+        r"\bearfcn[=:\s]+(\d+)",
+    ))
+
+    # PCI — check ci_block first, then PhysicalChannelConfigs (most reliable on S24)
+    pci : str = clean(first_of(
+        ci_block,
+        r"mPci[=:\s]+(\d+)",
+        r"mPhysicalCellId[=:\s]+(\d+)",
+        r"\bpci[=:\s]+(\d+)",
+    ))
+    if not pci:
+        # Fall back to PrimaryServing block in PhysicalChannelConfigs
+        m = re.search(
+            r"mConnectionStatus=PrimaryServing[^}]*?mPhysicalCellId=(\d+)", phone0
+        )
+        pci = clean(m.group(1) if m else "")
+
+    # Bandwidth — S24 reports sentinel in mBandwidth but the real value lives in
+    # mCellBandwidthDownlinkKhz inside PhysicalChannelConfigs
+    bw_raw : str = clean(first_of(ci_block, r"mBandwidth[=:\s]+(\d+)"))
+    if not bw_raw:
+        # Try PhysicalChannelConfigs for PrimaryServing component
+        m = re.search(
+            r"mConnectionStatus=PrimaryServing[^}]*?mCellBandwidthDownlinkKhz=(\d+)",
+            phone0
+        )
+        if m and m.group(1) != str(SENTINEL):
+            bw_raw = m.group(1)
+
+    # Provider name
+    provider : str = first_of(
+        ci_block,
+        r"mAlphaLong=([^,\s}]+)",
+        r"mOperatorAlphaLong=([^,\s}]+)",
+        r"operatorName=([^,\s}]+)",
+    )
+
+    if "Digi" in provider:
+        provider = "Digi"
+
+    return {
+        "mcc"         : mcc,
+        "mnc"         : mnc,
+        "tac"         : tac,
+        "eci"         : eci,
+        "earfcn"      : earfcn,
+        "pci"         : pci,
+        "lteBandwidth": map_bandwidth(bw_raw),
+        "provider"    : provider,
+    }
 
 
 def parse_carrier_aggregation(raw: str) -> dict:
@@ -550,7 +337,7 @@ def parse_carrier_aggregation(raw: str) -> dict:
     """
     phone0 : str = get_phone0_block(raw)
 
-    configs_match = re.search(r"mPhysicalChannelConfigs=\[(.+?)\]", phone0, re.DOTALL)
+    configs_match = re.search(r"(?:mPhysicalChannelConfigs|PhysicalChannelConfigs)=\[(.+?)\]", phone0, re.DOTALL | re.IGNORECASE)
     if not configs_match:
         return {"caEnabled": "", "caComponents": "", "caBandwidthsKhz": ""}
 
@@ -596,32 +383,11 @@ def _parse_location_block(block: str) -> dict:
         alt  : str = bracket.group(4) or ""
         spd  : str = bracket.group(5) or ""
     else:
-        lat = (
-            extract(r"\blat=(-?\d+\.\d+)",      block) or
-            extract(r"latitude=(-?\d+\.\d+)",   block) or
-            extract(r"mLatitude=(-?\d+\.\d+)",  block)
-        )
-        lon = (
-            extract(r"\blon=(-?\d+\.\d+)",      block) or
-            extract(r"longitude=(-?\d+\.\d+)",  block) or
-            extract(r"mLongitude=(-?\d+\.\d+)", block)
-        )
-        alt = (
-            extract(r"\balt=(-?\d+\.\d+)",      block) or
-            extract(r"altitude=(-?\d+\.\d+)",   block) or
-            extract(r"mAltitude=(-?\d+\.\d+)",  block)
-        )
-        spd = (
-            extract(r"\bvel=(-?\d+\.\d+)",      block) or
-            extract(r"speed=(-?\d+\.\d+)",      block) or
-            extract(r"mSpeed=(-?\d+\.\d+)",     block)
-        )
-        acc = (
-            extract(r"\bacc=(-?\d+\.\d+)",      block) or
-            extract(r"hAcc=(-?\d+\.\d+)",       block) or
-            extract(r"accuracy=(-?\d+\.\d+)",   block) or
-            extract(r"mAccuracy=(-?\d+\.\d+)",  block)
-        )
+        lat = first_of(block, r"\blat=(-?\d+\.\d+)", r"latitude=(-?\d+\.\d+)", r"mLatitude=(-?\d+\.\d+)")
+        lon = first_of(block, r"\blon=(-?\d+\.\d+)", r"longitude=(-?\d+\.\d+)", r"mLongitude=(-?\d+\.\d+)")
+        alt = first_of(block, r"\balt=(-?\d+\.\d+)", r"altitude=(-?\d+\.\d+)", r"mAltitude=(-?\d+\.\d+)")
+        spd = first_of(block, r"\bvel=(-?\d+\.\d+)", r"speed=(-?\d+\.\d+)", r"mSpeed=(-?\d+\.\d+)")
+        acc = first_of(block, r"\bacc=(-?\d+\.\d+)", r"hAcc=(-?\d+\.\d+)", r"accuracy=(-?\d+\.\d+)", r"mAccuracy=(-?\d+\.\d+)")
 
     return {
         "latitude" : "" if lat in ZERO_VALS else lat,
@@ -632,47 +398,17 @@ def _parse_location_block(block: str) -> dict:
     }
 
 
-def parse_location_xiaomi(raw: str) -> dict:
-    """
-    Parses GPS / fused location from Xiaomi / MIUI / HyperOS devices.
-    MIUI can report location under the 'fused' or 'gps' provider using
-    either the compact bracket format or long-form key=value fields.
-    Delegates field extraction to _parse_location_block.
-
-    @ raw   : str  = output from dumpsys location (grepped block)
-    -> dict : keys latitude, longitude, altitude, speed, accuracy
-              — all str, empty when absent or GPS not yet locked
-    """
-    return _parse_location_block(raw)
-
-
-def parse_location_generic(raw: str) -> dict:
-    """
-    Parses dumpsys location output for non-Xiaomi devices.
-    Handles both the compact bracket format used by the fused provider
-    and the AOSP short key=value format.
-    Delegates field extraction to _parse_location_block.
-
-    @ raw   : str  = output from dumpsys location (grepped block)
-    -> dict : keys latitude, longitude, altitude, speed, accuracy
-              — all str, empty when absent or GPS not yet locked
-    """
-    return _parse_location_block(raw)
-
-
 def parse_location(raw: str, manufacturer: str) -> dict:
     """
-    Dispatches location parsing to the appropriate OEM-specific parser.
+    Parses dumpsys location output for any device.
+    Delegates field extraction to _parse_location_block.
 
-    @ raw          : str  = output from dumpsys location
-    @ manufacturer : str  = lowercase manufacturer name
+    @ raw          : str  = output from dumpsys location (grepped block)
+    @ manufacturer : str  = lowercase manufacturer name (unused; kept for API compat)
     -> dict        : keys latitude, longitude, altitude, speed, accuracy
-                     — all str, empty when absent
+                     — all str, empty when absent or GPS not yet locked
     """
-    if any(b in manufacturer for b in ("xiaomi", "redmi", "poco")):
-        return parse_location_xiaomi(raw)
-
-    return parse_location_generic(raw)
+    return _parse_location_block(raw)
 
 
 def get_location_dump(manufacturer: str) -> str:
@@ -800,14 +536,24 @@ def run_loop(serial: str, manufacturer: str) -> None:
     """
     Main collection loop. Writes the CSV header once, then collects RUNS rows
     at INTERVAL_SEC cadence, flushing after each write.
+
+    The file is written with:
+      - UTF-8 BOM (utf-8-sig) so Excel opens it correctly without treating
+        all columns as one — this is the most reliable fix for older Excel
+        versions that ignore the Content-Type and default to the system ANSI page.
+      - Explicit comma delimiter (Excel's list separator must match; BOM signals UTF-8
+        which locks the delimiter to comma in most locales).
+
     Progress is printed as [n/m] only — no field data is echoed to stdout.
 
     @ serial       : str = device serial number
     @ manufacturer : str = lowercase manufacturer name
     -> None
     """
-    with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
-        writer : csv.DictWriter = csv.DictWriter(f, fieldnames=HEADERS)
+    with open(OUTPUT_FILE, "w", newline="", encoding="utf-8-sig") as f:
+        writer : csv.DictWriter = csv.DictWriter(
+            f, fieldnames=HEADERS, delimiter=",", quoting=csv.QUOTE_MINIMAL
+        )
         write_header(writer)
 
         count : int = 0
@@ -828,7 +574,7 @@ def main() -> None:
     Entry point. Detects device serial and manufacturer, runs a preflight
     diagnostic row to surface missing fields early, then starts the
     collection loop.
-    
+
     @ None
     -> None
     """
