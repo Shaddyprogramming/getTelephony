@@ -158,15 +158,34 @@ def to_sci_khz(raw_val: str) -> str:
 
 def get_phone0_block(raw: str) -> str:
     """
-    Isolates the Phone Id=0 block from dumpsys telephony.registry output.
-    Prevents picking up garbage values from empty secondary SIM slots.
-
+    Returns the Phone Id block that contains active LTE data.
+ 
+    Splits the dump on 'Phone Id=N' boundaries and picks the first block
+    that contains a non-null CellIdentityLte entry. This handles dual-SIM
+    devices where the active SIM is in slot 1 (or higher) rather than
+    slot 0 — e.g. Samsung S24 with SIM in slot 1 reports everything under
+    Phone Id=1 while Phone Id=0 is empty.
+ 
+    Falls back to the first block if no block contains cell data, and to
+    the full raw string if there are no split points at all.
+ 
     @ raw  : str = full dumpsys telephony.registry output
-    -> str : text content belonging to Phone Id=0 only;
-             falls back to the full raw string when no split point is found
+    -> str : text content of the active Phone Id block
     """
     parts = re.split(r"Phone Id=\d+", raw)
-    return parts[1] if len(parts) > 1 else raw
+    if len(parts) <= 1:
+        return raw
+ 
+    # Skip parts[0] — it is the text before the first "Phone Id=" marker
+    blocks = parts[1:]
+ 
+    # Prefer the first block that has a real (non-null) CellIdentityLte
+    for block in blocks:
+        if re.search(r"CellIdentityLte[^n]", block):  # excludes "CellIdentityLte:null"
+            return block
+ 
+    # Nothing matched — return first block as original behaviour
+    return blocks[0]
 
 
 def parse_lte_signal(raw: str) -> dict:
