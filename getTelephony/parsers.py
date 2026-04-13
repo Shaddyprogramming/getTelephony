@@ -101,6 +101,49 @@ def get_phone0_block(raw: str) -> str:
     return blocks[0]
 
 
+def parse_signalstrength_fallback(phone_block: str) -> dict:
+    """
+    Fallback parser for 'mSignalStrength=SignalStrength:' lines without LTE blocks.
+
+    @ phone_block : str  = active Phone Id block
+    -> dict       : keys rsrp, rsrq, rssi, snr, ta — all str, empty when absent
+    """
+    m = re.search(r"mSignalStrength=SignalStrength:\s*([^\n]+)", phone_block)
+    if not m:
+        return {"rsrp": "", "rsrq": "", "rssi": "", "snr": "", "ta": ""}
+
+    line = m.group(1)
+    if "lte" not in line.lower():
+        return {"rsrp": "", "rsrq": "", "rssi": "", "snr": "", "ta": ""}
+
+    nums = re.findall(r"-?\d+", line)
+    if len(nums) < 12:
+        return {"rsrp": "", "rsrq": "", "rssi": "", "snr": "", "ta": ""}
+
+    unknowns : set[str] = {"99", "255"}
+
+    def clean_unknown(val: str) -> str:
+        if val in unknowns:
+            return ""
+        return clean(val)
+
+    lte_signalstrength = nums[7] if len(nums) >= 8 else ""
+    rsrp              = nums[8] if len(nums) >= 9 else ""
+    rsrq              = nums[9] if len(nums) >= 10 else ""
+    rssnr             = nums[10] if len(nums) >= 11 else ""
+    ta                = nums[12] if len(nums) >= 13 else ""
+
+    rssi = clean_unknown(lte_signalstrength) if lte_signalstrength else ""
+
+    return {
+        "rsrp": clean_unknown(rsrp),
+        "rsrq": clean_unknown(rsrq),
+        "rssi": rssi,
+        "snr" : clean_unknown(rssnr),
+        "ta"  : clean_unknown(ta),
+    }
+
+
 def parse_lte_signal(raw: str) -> dict:
     """
     Extracts LTE signal metrics from the mSignalStrength block.
@@ -120,7 +163,7 @@ def parse_lte_signal(raw: str) -> dict:
             lte_block = m.group(1)
 
     if not lte_block:
-        return {"rsrp": "", "rsrq": "", "rssi": "", "snr": "", "ta": ""}
+        return parse_signalstrength_fallback(phone0)
 
     return {
         "rsrp": clean(extract(r"rsrp=(-?\d+)",  lte_block)),
@@ -172,15 +215,20 @@ def parse_cell_identity(raw: str, manufacturer: str) -> dict:
 
     bw_raw = clean(first_of(ci_block, r"mBandwidth[=:\s]+(\d+)"))
     if not bw_raw:
+        bw_raw = clean(first_of(phone0, r"mCellBandwidths=\[(\d+)\]"))
+    if not bw_raw:
         m = re.search(r"mConnectionStatus=PrimaryServing[^}]*?mCellBandwidthDownlinkKhz=(\d+)", phone0)
         if m and m.group(1) != str(SENTINEL):
             bw_raw = m.group(1)
 
+    provider_src : str = ci_block + "\n" + phone0
     provider = normalize_provider(first_of(
-        ci_block,
-        r"mAlphaLong=([^,\s}]+)",
-        r"mOperatorAlphaLong=([^,\s}]+)",
-        r"operatorName=([^,\s}]+)",
+        provider_src,
+        r"mAlphaLong=([^,}]+?)(?:\s+mAlphaShort=|$)",
+        r"mDataOperatorAlphaLong=([^,}]+)",
+        r"mVoiceOperatorAlphaLong=([^,}]+)",
+        r"mOperatorAlphaLong=([^,}]+)",
+        r"operatorName=([^,}]+)",
     ))
 
     return {
@@ -193,7 +241,6 @@ def parse_cell_identity(raw: str, manufacturer: str) -> dict:
         "lteBandwidth": format_bandwidth(bw_raw),
         "provider"    : provider,
     }
-
 
 def parse_carrier_aggregation(raw: str) -> dict:
     """
