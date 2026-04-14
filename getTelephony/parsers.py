@@ -85,12 +85,6 @@ def normalize_provider(raw: str) -> str:
 
 
 def get_phone0_block(raw: str) -> str:
-    """
-    Returns the Phone Id block containing active LTE data.
-
-    @ raw  : str = full dumpsys telephony.registry output
-    -> str : content of the active Phone Id block
-    """
     parts = re.split(r"Phone Id=\d+", raw)
     if len(parts) <= 1:
         return raw
@@ -175,22 +169,20 @@ def parse_lte_signal(raw: str) -> dict:
 
 
 def parse_cell_identity(raw: str, manufacturer: str) -> dict:
-    """
-    Extracts cell identity fields from dumpsys telephony.registry.
-
-    @ raw          : str  = full dumpsys telephony.registry output
-    @ manufacturer : str  = lowercase manufacturer name from getprop
-    -> dict        : keys mcc, mnc, tac, eci, earfcn, pci, lteBandwidth, provider
-                     — all str, empty when absent
-    """
     phone0   : str = get_phone0_block(raw)
     ci_block : str = ""
 
-    for pattern in (r"CellIdentityLte[:\s]*\{([^}]+)\}", r"mCellIdentity(?:LTE|Lte|LTE4G)?[=:\s{]+([^}]+)\}"):
-        m = re.search(pattern, phone0, re.IGNORECASE)
-        if m:
-            ci_block = m.group(1)
-            break
+    m = re.search(
+        r"mRegistered=(?:YES|HOME|ROAMING)[^}]*?CellIdentityLte[:\s]*\{([^}]+)\}",
+        phone0, re.IGNORECASE | re.DOTALL
+    )
+    if not m:
+        for pattern in (r"CellIdentityLte[:\s]*\{([^}]+)\}", r"mCellIdentity(?:LTE|Lte|LTE4G)?[=:\s{]+([^}]+)\}"):
+            m = re.search(pattern, phone0, re.IGNORECASE)
+            if m:
+                break
+    if m:
+        ci_block = m.group(1)
     if not ci_block:
         ci_block = phone0
 
@@ -199,8 +191,17 @@ def parse_cell_identity(raw: str, manufacturer: str) -> dict:
 
     is_xiaomi : bool = any(b in manufacturer for b in XIAOMI_BRANDS)
 
-    tac = "hidden" if is_xiaomi else clean(first_of(ci_block, r"mTac[=:\s]+(\d+)", r"\btac[=:\s]+(\d+)"))
-    eci = "hidden" if is_xiaomi else clean(first_of(ci_block, r"mCi[=:\s]+(\d+)", r"mEci[=:\s]+(\d+)", r"\bci[=:\s]+(\d+)"))
+    tac = "hidden" if is_xiaomi else clean(first_of(
+        ci_block,
+        r"mTac[=:\s]+([\d*]+)",
+        r"\btac[=:\s]+([\d*]+)",
+    ))
+    eci = "hidden" if is_xiaomi else clean(first_of(
+        ci_block,
+        r"mCi[=:\s]+([\d*]+)",
+        r"mEci[=:\s]+([\d*]+)",
+        r"(?<![a-zA-Z])ci[=:\s]+([\d*]+)",
+    ))
 
     earfcn = clean(first_of(
         ci_block + "\n" + phone0,
