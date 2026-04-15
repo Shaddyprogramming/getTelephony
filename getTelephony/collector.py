@@ -61,6 +61,8 @@ def collect_row(serial: str, manufacturer: str) -> dict:
         "mnc"               : identity["mnc"],
         "tac"               : identity["tac"],
         "eci"               : identity["eci"],
+        "eNB_ID"            : identity["eNB_ID"],
+        "Cell_ID"           : identity["Cell_ID"],
         "earfcn"            : identity["earfcn"],
         "pci"               : identity["pci"],
         "rsrp"              : signal["rsrp"],

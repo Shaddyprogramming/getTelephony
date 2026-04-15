@@ -1,5 +1,5 @@
 import re
-from constants import SENTINEL, PROVIDER_ALIASES, XIAOMI_BRANDS
+from constants import SENTINEL, PROVIDER_ALIASES, RESTRICTED_BRANDS
 
 
 def extract(pattern: str, text: str, fallback: str = "") -> str:
@@ -68,6 +68,46 @@ def format_bandwidth(raw_val: str) -> str:
         return khz_to_mhz(khz) if khz >= 1000 else f"{khz} kHz"
     except ValueError:
         return raw_val
+
+
+def extract_enb_id(eci: str) -> str:
+    """
+    Derives the eNB ID from an ECI value by right-shifting 8 bits.
+
+    @ eci  : str = ECI value; 'hidden' or '*'-containing strings propagate as-is
+    -> str : eNB ID as string, 'hidden' if eci is hidden, '*' if eci is censored,
+             empty string if eci is absent
+    """
+    if eci == "hidden":
+        return "hidden"
+    if not eci:
+        return ""
+    if "*" in eci:
+        return "*"*len(eci)
+    try:
+        return str(int(eci) >> 8)
+    except ValueError:
+        return ""
+
+
+def extract_cell_id(eci: str) -> str:
+    """
+    Derives the Cell ID from an ECI value by masking the last 8 bits.
+
+    @ eci  : str = ECI value; 'hidden' or '*'-containing strings propagate as-is
+    -> str : Cell ID as string, 'hidden' if eci is hidden, '*' if eci is censored,
+             empty string if eci is absent
+    """
+    if eci == "hidden":
+        return "hidden"
+    if not eci:
+        return ""
+    if "*" in eci:
+        return "*"*len(eci)
+    try:
+        return str(int(eci) & 0xFF)
+    except ValueError:
+        return ""
 
 
 def normalize_provider(raw: str) -> str:
@@ -189,14 +229,14 @@ def parse_cell_identity(raw: str, manufacturer: str) -> dict:
     mcc = clean(first_of(ci_block, r"mMcc(?:Str)?[=:\s]+(\d+)", r"\bmcc[=:\s]+(\d+)"))
     mnc = clean(first_of(ci_block, r"mMnc(?:Str)?[=:\s]+(\d+)", r"\bmnc[=:\s]+(\d+)"))
 
-    is_xiaomi : bool = any(b in manufacturer for b in XIAOMI_BRANDS)
+    is_restricted : bool = any(b in manufacturer for b in RESTRICTED_BRANDS)
 
-    tac = "hidden" if is_xiaomi else clean(first_of(
+    tac = "hidden" if is_restricted else clean(first_of(
         ci_block,
         r"mTac[=:\s]+([\d*]+)",
         r"\btac[=:\s]+([\d*]+)",
     ))
-    eci = "hidden" if is_xiaomi else clean(first_of(
+    eci = "hidden" if is_restricted else clean(first_of(
         ci_block,
         r"mCi[=:\s]+([\d*]+)",
         r"mEci[=:\s]+([\d*]+)",
@@ -237,6 +277,8 @@ def parse_cell_identity(raw: str, manufacturer: str) -> dict:
         "mnc"         : mnc,
         "tac"         : tac,
         "eci"         : eci,
+        "eNB_ID"      : extract_enb_id(eci),
+        "Cell_ID"     : extract_cell_id(eci),
         "earfcn"      : earfcn,
         "pci"         : pci,
         "lteBandwidth": format_bandwidth(bw_raw),

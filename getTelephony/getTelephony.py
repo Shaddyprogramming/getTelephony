@@ -2,7 +2,7 @@ import csv
 import time
 from adb_utils import get_serial, get_manufacturer
 from collector import collect_row
-from constants import OUTPUT_FILE, INTERVAL_SEC, RUNS, HEADERS, XIAOMI_BRANDS
+from constants import OUTPUT_FILE, INTERVAL_SEC, RUNS, HEADERS, RESTRICTED_BRANDS
 
 
 def run_loop(serial: str, manufacturer: str) -> None:
@@ -42,6 +42,8 @@ def main() -> None:
 
     manufacturer : str = get_manufacturer()
     print(f"Device   : {serial}  ({manufacturer or 'unknown manufacturer'})")
+    if manufacturer and manufacturer in RESTRICTED_BRANDS:
+        print("WARNING: Detected restricted device. Some fields will be unavailable due to OS restrictions.\n")
     print(f"Output   : {OUTPUT_FILE}  |  interval {INTERVAL_SEC}s  |  {RUNS} runs\n")
 
     print("Preflight check...")
@@ -51,8 +53,8 @@ def main() -> None:
         "cellChangeDetected", "signalDeltaRsrp",
         "latitude", "longitude", "altitude", "speed", "accuracy",
     }
-    if any(b in manufacturer for b in XIAOMI_BRANDS):
-        expected_empty.update({"tac", "eci"})
+    if any(b in manufacturer for b in RESTRICTED_BRANDS):
+        expected_empty.update({"tac", "eci", "eNB_ID", "Cell_ID"})
 
     missing : list[str] = [k for k, v in diag.items() if v in ("", None) and k not in expected_empty]
 

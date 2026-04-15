@@ -6,7 +6,7 @@ SENTINEL : int = 2147483647
 
 HEADERS : list = [
     "deviceTime",
-    "mcc", "mnc", "tac", "eci", "earfcn", "pci",
+    "mcc", "mnc", "tac", "eci", "eNB_ID", "Cell_ID", "earfcn", "pci",
     "rsrp", "rsrq", "rssi", "snr", "ta",
     "provider", "servingCell", "lteBandwidth",
     "caEnabled", "caComponents", "caBandwidthsKhz",
@@ -49,4 +49,4 @@ PROVIDER_ALIASES : dict = {
     "beeline"         : "Beeline",
 }
 
-XIAOMI_BRANDS : tuple = ("xiaomi", "redmi", "poco")
+RESTRICTED_BRANDS : tuple = ("xiaomi", "redmi", "poco")
